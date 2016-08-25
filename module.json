@@ -1,0 +1,12 @@
+{
+  "name": "mbedos-demo",
+  "version": "0.0.1",
+  "bin": "./source",
+  "private": true,
+  "description": "mbed os demo application",
+  "author": "kinsey",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "mbed-client": "^1.13.2"
+  }
+}
