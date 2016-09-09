@@ -6,9 +6,8 @@
 #include "security.h"
 #include <vector>
 #include "mbed-trace/mbed_trace.h"
-#include "sockets/TCPListener.h"
-#include "sal/socket_api.h"
 #include "core-util/FunctionPointer.h"
+#include "FXOS8700Q.h"
 
 using namespace mbed::util;
 
@@ -22,10 +21,56 @@ using namespace mbed::util;
 /* variable */
 static uint32_t adcrTemp25 = 0;        /*! Calibrated ADCR_TEMP25 */
 static uint32_t adcr100m = 0;
-// 
+// declare
+void ble_RxIrq();
+
+I2C i2c(PTE25, PTE24);
+FXOS8700QAccelerometer accel(i2c,FXOS8700CQ_SLAVE_ADDR1);
+
+motion_data_counts_t acc_raw;
+motion_data_units_t acc_data;
+
 EthernetInterface eth;
 
+//get stdio
 Serial &output = get_stdio_serial();
+
+//ble uses uart3
+
+
+Serial& get_ble_serial()
+{
+    static bool ble_uart_inited = false;
+    static Serial stdio_serial(PTC17, PTC16);
+    if (!ble_uart_inited) {
+        stdio_serial.baud(115200);
+        stdio_serial.attach(&ble_RxIrq, Serial::RxIrq);
+        ble_uart_inited = true;
+    }
+    return stdio_serial;
+} 
+Serial &bleUart = get_ble_serial();
+void ble_RxIrq()
+{
+    static unsigned char buf[100]={0};
+    static unsigned char i = 0;
+
+    while(bleUart.readable())
+    {
+
+        buf[i]=bleUart.getc();
+
+        if(buf[i]=='.')
+        {
+            buf[i]='\0';
+            i = 0;
+            printf("%s\n", buf);
+            memset(buf,'\0', sizeof(char)*100);                        
+            break;
+        } 
+        i++;               
+    }
+}
 
 // These are example resource values for the Device Object
 struct MbedClientDevice device = {
@@ -46,39 +91,39 @@ InterruptIn unreg_button(SW3);
 DigitalOut led1(LED1);
 
 
-void getADC(void)
-{
-	uint32_t adcValue = 0;
-    // uint32_t vdd = 3306;          /*! VDD in mV */
-    /* Calibrate ADCR_TEMP25: ADCR_TEMP25 = ADCR_VDD x V_TEMP25 / VDD */
-    adcrTemp25 = ADCR_VDD * V_TEMP25 / VDD;
-    /* ADCR_100M = ADCR_VDD x M x 100 / VDD */
-    adcr100m = (ADCR_VDD * M) / (VDD * 10);
+// void getADC(void)
+// {
+// 	uint32_t adcValue = 0;
+//     // uint32_t vdd = 3306;          /*! VDD in mV */
+//     /* Calibrate ADCR_TEMP25: ADCR_TEMP25 = ADCR_VDD x V_TEMP25 / VDD */
+//     adcrTemp25 = ADCR_VDD * V_TEMP25 / VDD;
+//     /* ADCR_100M = ADCR_VDD x M x 100 / VDD */
+//     adcr100m = (ADCR_VDD * M) / (VDD * 10);
 
-    /* measure mcu temperature. */
-	AnalogIn adc(A0);
-	adcValue = adc.read_temp();
-	adcValue = (uint32_t)(STANDARD_TEMP - ((int32_t)adcValue - (int32_t)adcrTemp25) * 100 / (int32_t)adcr100m);
-	printf("adcValue = %ld\n", adcValue);
-	// return adcValue;
-}
+//     /* measure mcu temperature. */
+// 	AnalogIn adc(A0);
+// 	adcValue = adc.read_temp();
+// 	adcValue = (uint32_t)(STANDARD_TEMP - ((int32_t)adcValue - (int32_t)adcrTemp25) * 100 / (int32_t)adcr100m);
+// 	printf("adcValue = %ld\n", adcValue);
+// 	// return adcValue;
+// }
 
-uint32_t getTemp(void)
-{
-	uint32_t adcValue = 0;
-    // uint32_t vdd = 3306;          /*! VDD in mV */
-    /* Calibrate ADCR_TEMP25: ADCR_TEMP25 = ADCR_VDD x V_TEMP25 / VDD */
-    adcrTemp25 = ADCR_VDD * V_TEMP25 / VDD;
-    /* ADCR_100M = ADCR_VDD x M x 100 / VDD */
-    adcr100m = (ADCR_VDD * M) / (VDD * 10);
+// uint32_t getTemp(void)
+// {
+// 	uint32_t adcValue = 0;
+//     // uint32_t vdd = 3306;          /*! VDD in mV */
+//     /* Calibrate ADCR_TEMP25: ADCR_TEMP25 = ADCR_VDD x V_TEMP25 / VDD */
+//     adcrTemp25 = ADCR_VDD * V_TEMP25 / VDD;
+//     /* ADCR_100M = ADCR_VDD x M x 100 / VDD */
+//     adcr100m = (ADCR_VDD * M) / (VDD * 10);
 
-    /* measure mcu temperature. */
-	AnalogIn adc(A0);
-	adcValue = adc.read_temp();
-	adcValue = (uint32_t)(STANDARD_TEMP - ((int32_t)adcValue - (int32_t)adcrTemp25) * 100 / (int32_t)adcr100m);
-	printf("adcValue = %ld\n", adcValue);
-	return adcValue;
-}
+//     /* measure mcu temperature. */
+// 	AnalogIn adc(A0);
+// 	adcValue = adc.read_temp();
+// 	adcValue = (uint32_t)(STANDARD_TEMP - ((int32_t)adcValue - (int32_t)adcrTemp25) * 100 / (int32_t)adcr100m);
+// 	printf("adcValue = %ld\n", adcValue);
+// 	return adcValue;
+// }
 
 /*
  * The Led contains one property (pattern) and a function (blink).
@@ -213,6 +258,79 @@ private:
     uint16_t counter = 0;
 };  
 
+/*
+ * The acce contains one property (click count).
+ * When `handle_button_click` is executed, the counter updates.
+ */
+// class AcceResource {
+// public:
+//     AcceResource() {
+//         // create ObjectID with metadata tag of 'location', which is 'digital input'
+//         acce_object = M2MInterfaceFactory::create_object("loc");
+//         M2MObjectInstance* acce_inst = acce_object->create_object_instance();
+//         // create resource with ID 'x', which is digital input counter
+//         M2MResource* resx = acce_inst->create_dynamic_resource("x", "8700",
+//             M2MResourceInstance::INTEGER, true /* observable */);
+//         // we can read this value
+//         resx->set_operation(M2MBase::GET_POST_ALLOWED);
+//         // set initial value (all values in mbed Client are buffers)
+//         // to be able to read this data easily in the Connector console, we'll use a string
+//         resx->set_value((uint8_t*)"0", 1);
+//         M2MResource* resy = acce_inst->create_dynamic_resource("y", "8700",
+//             M2MResourceInstance::INTEGER, true /* observable */);
+//         // we can read this value
+//         resy->set_operation(M2MBase::GET_POST_ALLOWED);
+//         // set initial value (all values in mbed Client are buffers)
+//         // to be able to read this data easily in the Connector console, we'll use a string
+//         resy->set_value((uint8_t*)"0", 1);        
+//     }
+
+//     M2MObject* get_object() {
+//         return acce_object;
+//     }
+
+//     /*
+//      * When you press the button, we read the current value of the click counter
+//      * from mbed Device Connector, then up the value with one.
+//      */
+//     void handle_button_click() {
+//         M2MObjectInstance* inst = acce_object->object_instance();
+//         M2MResource* res = inst->resource("5501");
+
+//         // up counter
+//         counter++;
+
+//         printf("handle_button_click, new value of counter is %d\r\n", counter);
+
+//         // serialize the value of counter as a string, and tell connector
+//         stringstream ss;
+//         ss << counter;
+//         std::string stringified = ss.str();
+//         res->set_value((uint8_t*)stringified.c_str(), stringified.length());
+//     }
+
+// private:
+//     M2MObject* acce_object;
+//     uint16_t counter = 0;
+// };
+
+
+// sample the accelerometer every second
+void acceSample(void) {
+    char buffer[24];
+    accel.getAxis(acc_raw);
+    int len = 0;
+
+    len = snprintf(buffer,sizeof(buffer), "%d",acc_raw.x);
+    printf("x: %s\r\n",buffer);
+
+    // Y
+    len = snprintf(buffer,sizeof(buffer), "%d",acc_raw.y);
+    printf("y: %s\r\n",buffer);
+
+}
+
+
 class TempResource
 {
 public:
@@ -268,6 +386,8 @@ private:
 
 void app_start(int, char**)
 {
+
+    bleUart.printf("uart3 printf\n");
 	output.baud(115200);
 	printf("App init success!\r\n");
 
@@ -311,5 +431,5 @@ void app_start(int, char**)
 
 	minar::Scheduler::postCallback(fp.bind(registerObject,objectList));
 	minar::Scheduler::postCallback(&mbed_client,&MbedClient::test_update_register).period(minar::milliseconds(25000));
-
+    // minar::Scheduler::postCallback(acceSample).period(minar::milliseconds(500));
 }
