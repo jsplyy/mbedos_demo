@@ -8,24 +8,37 @@
 #include "mbed-trace/mbed_trace.h"
 #include "core-util/FunctionPointer.h"
 #include "FXOS8700Q.h"
-
+#include "debug.h"
 using namespace mbed::util;
 
-/* micro define */
+/* temperature micro define */
 #define ADCR_VDD (65535U) /* Maximum value when use 16b resolution */
 #define V_BG (1000U)      /* BANDGAP voltage in mV (trim to 1.0V) */
 #define VDD 3306
 #define V_TEMP25 (716U)   /* Typical VTEMP25 in mV */
 #define M (1620U)         /* Typical slope: (mV x 1000)/oC */
 #define STANDARD_TEMP (25U)
-/* variable */
+
+/* multiplicative conversion constants */
+#define DegToRad 0.017453292
+#define RadToDeg 57.295779
+#define MAX_ACCEL_AVG_COUNT 1
+
+int16_t g_Ax_buff[MAX_ACCEL_AVG_COUNT] = {0};
+int16_t g_Ay_buff[MAX_ACCEL_AVG_COUNT] = {0};
+int16_t g_Az_buff[MAX_ACCEL_AVG_COUNT] = {0};
+
+/* temperature variable */
 static uint32_t adcrTemp25 = 0;        /*! Calibrated ADCR_TEMP25 */
 static uint32_t adcr100m = 0;
-// declare
+static int32_t acceAngle = 0;
+unsigned char bleUartContent[100]={};
+// declaration
 void ble_RxIrq();
 
 I2C i2c(PTE25, PTE24);
 FXOS8700QAccelerometer accel(i2c,FXOS8700CQ_SLAVE_ADDR1);
+FXOS8700QAccelerometer mag(i2c,FXOS8700CQ_SLAVE_ADDR1);
 
 motion_data_counts_t acc_raw;
 motion_data_units_t acc_data;
@@ -64,7 +77,10 @@ void ble_RxIrq()
         {
             buf[i]='\0';
             i = 0;
-            printf("%s\n", buf);
+            memset(bleUartContent,'\0', sizeof(char)*100);
+
+            snprintf((char *)bleUartContent, strlen((const char*)buf)+1, "%s\n", buf);
+            DEBUG("ble uart content = %s\n", bleUartContent);
             memset(buf,'\0', sizeof(char)*100);                        
             break;
         } 
@@ -104,7 +120,7 @@ DigitalOut led1(LED1);
 // 	AnalogIn adc(A0);
 // 	adcValue = adc.read_temp();
 // 	adcValue = (uint32_t)(STANDARD_TEMP - ((int32_t)adcValue - (int32_t)adcrTemp25) * 100 / (int32_t)adcr100m);
-// 	printf("adcValue = %ld\n", adcValue);
+// 	DEBUG("adcValue = %ld\n", adcValue);
 // 	// return adcValue;
 // }
 
@@ -121,7 +137,7 @@ DigitalOut led1(LED1);
 // 	AnalogIn adc(A0);
 // 	adcValue = adc.read_temp();
 // 	adcValue = (uint32_t)(STANDARD_TEMP - ((int32_t)adcValue - (int32_t)adcrTemp25) * 100 / (int32_t)adcr100m);
-// 	printf("adcValue = %ld\n", adcValue);
+// 	DEBUG("adcValue = %ld\n", adcValue);
 // 	return adcValue;
 // }
 
@@ -154,7 +170,7 @@ public:
         led_res->set_execute_function(execute_callback(this, &LedResource::blink));
     }
 
-    M2MObject* get_object() {
+    M2MObject* getObject() {
         return led_object;
     }
 
@@ -179,7 +195,7 @@ public:
             v->push_back(atoi((const char*)item.c_str()));
         }
 
-        output.printf("led_execute_callback pattern=%s\r\n", s.c_str());
+        output.DEBUG("led_execute_callback pattern=%s\r\n", s.c_str());
 
         // do_blink is called with the vector, and starting at -1
         do_blink(v, 0);
@@ -229,7 +245,7 @@ public:
         btn_res->set_value((uint8_t*)"0", 1);
     }
 
-    M2MObject* get_object() {
+    M2MObject* getObject() {
         return btn_object;
     }
 
@@ -244,7 +260,7 @@ public:
         // up counter
         counter++;
 
-        printf("handle_button_click, new value of counter is %d\r\n", counter);
+        DEBUG("handle_button_click, new value of counter is %d\r\n", counter);
 
         // serialize the value of counter as a string, and tell connector
         stringstream ss;
@@ -262,157 +278,306 @@ private:
  * The acce contains one property (click count).
  * When `handle_button_click` is executed, the counter updates.
  */
-// class AcceResource {
-// public:
-//     AcceResource() {
-//         // create ObjectID with metadata tag of 'location', which is 'digital input'
-//         acce_object = M2MInterfaceFactory::create_object("loc");
-//         M2MObjectInstance* acce_inst = acce_object->create_object_instance();
-//         // create resource with ID 'x', which is digital input counter
-//         M2MResource* resx = acce_inst->create_dynamic_resource("x", "8700",
-//             M2MResourceInstance::INTEGER, true /* observable */);
-//         // we can read this value
-//         resx->set_operation(M2MBase::GET_POST_ALLOWED);
-//         // set initial value (all values in mbed Client are buffers)
-//         // to be able to read this data easily in the Connector console, we'll use a string
-//         resx->set_value((uint8_t*)"0", 1);
-//         M2MResource* resy = acce_inst->create_dynamic_resource("y", "8700",
-//             M2MResourceInstance::INTEGER, true /* observable */);
-//         // we can read this value
-//         resy->set_operation(M2MBase::GET_POST_ALLOWED);
-//         // set initial value (all values in mbed Client are buffers)
-//         // to be able to read this data easily in the Connector console, we'll use a string
-//         resy->set_value((uint8_t*)"0", 1);        
-//     }
+class AngleResource {
+public:
+    AngleResource() {
+        // create ObjectID with metadata tag of 'location', which is 'digital input'
+        acce_object = M2MInterfaceFactory::create_object("6-axis");
+        M2MObjectInstance* acce_inst = acce_object->create_object_instance();
+        // create resource with ID 'x', which is digital input counter
+        M2MResource* resx = acce_inst->create_dynamic_resource("first", "Angle",
+            M2MResourceInstance::INTEGER, true /* observable */);
+        // we can read this value
+        resx->set_operation(M2MBase::GET_POST_ALLOWED);
+        // set initial value (all values in mbed Client are buffers)
+        // to be able to read this data easily in the Connector console, we'll use a string
+        resx->set_value((uint8_t*)"100", 3);
+        resx->set_execute_function(execute_callback(this,&AngleResource::updateAngle));
+    }
 
-//     M2MObject* get_object() {
-//         return acce_object;
-//     }
+    M2MObject* getObject() {
+        return acce_object;
+    }
 
-//     /*
-//      * When you press the button, we read the current value of the click counter
-//      * from mbed Device Connector, then up the value with one.
-//      */
-//     void handle_button_click() {
-//         M2MObjectInstance* inst = acce_object->object_instance();
-//         M2MResource* res = inst->resource("5501");
-
-//         // up counter
-//         counter++;
-
-//         printf("handle_button_click, new value of counter is %d\r\n", counter);
-
-//         // serialize the value of counter as a string, and tell connector
-//         stringstream ss;
-//         ss << counter;
-//         std::string stringified = ss.str();
-//         res->set_value((uint8_t*)stringified.c_str(), stringified.length());
-//     }
-
-// private:
-//     M2MObject* acce_object;
-//     uint16_t counter = 0;
-// };
+private:
+    void updateAngle(void *) {
+        M2MObjectInstance* inst = acce_object->object_instance();
+        M2MResource* res = inst->resource("first");
+        DEBUG("current acceAngle is:%ld\n",acceAngle);
+        stringstream ss;
+        ss << acceAngle;
+        // if(acceAngle < 0)
+        // {
+        //     ss << '-' + acceAngle;
+        // }
+        // else
+        // {
+        //     ss << acceAngle;
+        // }
+        
+        std::string stringField = ss.str();
+        // std::string stringField = "36";
+        res->set_value((uint8_t*)stringField.c_str(), stringField.length());
+    }
 
 
-// sample the accelerometer every second
-void acceSample(void) {
-    char buffer[24];
-    accel.getAxis(acc_raw);
-    int len = 0;
 
-    len = snprintf(buffer,sizeof(buffer), "%d",acc_raw.x);
-    printf("x: %s\r\n",buffer);
 
-    // Y
-    len = snprintf(buffer,sizeof(buffer), "%d",acc_raw.y);
-    printf("y: %s\r\n",buffer);
+private:
+    M2MObject* acce_object;
+    uint16_t counter = 0;
+};
 
-}
+class BleResource {
+public:
+    BleResource() {
+        // create ObjectID with metadata tag of 'BLE', which is 'kw40 wireless'
+        ble_object = M2MInterfaceFactory::create_object("BLE");
+        M2MObjectInstance* ble_inst = ble_object->create_object_instance();
+        // create resource with ID 'x', which is uart content
+        M2MResource* bleContent = ble_inst->create_dynamic_resource("kw40", "content",
+            M2MResourceInstance::STRING, true /* observable */);
+        // we can read this value
+        bleContent->set_operation(M2MBase::GET_POST_ALLOWED);
+        // set initial value (all values in mbed Client are buffers)
+        // to be able to read this data easily in the Connector console, we'll use a string
+        bleContent->set_value((uint8_t*)"BLE", 3);
+        bleContent->set_execute_function(execute_callback(this,&BleResource::updatecontent));
+    }
+
+    M2MObject* getObject() {
+        return ble_object;
+    }
+
+private:
+    void updatecontent(void *) {
+        M2MObjectInstance* inst = ble_object->object_instance();
+        M2MResource* res = inst->resource("kw40");
+        stringstream ss;
+        ss << bleUartContent;
+        std::string stringField = ss.str();
+        // std::string stringField = "36";
+        res->set_value((uint8_t*)stringField.c_str(), stringField.length());
+    }
+
+
+
+
+private:
+    M2MObject* ble_object;
+};
+
 
 
 class TempResource
 {
 public:
-	TempResource(){
-		tempObject = M2MInterfaceFactory::create_object("3205");
-		M2MObjectInstance* tempInstance = tempObject->create_object_instance();
-		M2MResource* TempRes = tempInstance->create_dynamic_resource("3206","temp",M2MResourceInstance::INTEGER,true);
-		TempRes->set_operation(M2MBase::GET_POST_ALLOWED);
-		TempRes->set_value((uint8_t*)"42",2);
-		TempRes->set_execute_function(execute_callback(this,&TempResource::updateTemperature));
-	}
+    TempResource(){
+        tempObject = M2MInterfaceFactory::create_object("3205");
+        M2MObjectInstance* tempInstance = tempObject->create_object_instance();
+        M2MResource* TempRes = tempInstance->create_dynamic_resource("3206","temp",M2MResourceInstance::INTEGER,true);
+        TempRes->set_operation(M2MBase::GET_POST_ALLOWED);
+        TempRes->set_value((uint8_t*)"42",2);
+        TempRes->set_execute_function(execute_callback(this,&TempResource::updateTemperature));
+    }
 
-	M2MObject* getObject(){
-		return tempObject;
-	}
+    M2MObject* getObject(){
+        return tempObject;
+    }
 
-	uint32_t getADC(void)
-	{
-		uint32_t adcValue = 0;
-	    // uint32_t vdd = 3306;          /*! VDD in mV */
-	    /* Calibrate ADCR_TEMP25: ADCR_TEMP25 = ADCR_VDD x V_TEMP25 / VDD */
-	    adcrTemp25 = ADCR_VDD * V_TEMP25 / VDD;
-	    /* ADCR_100M = ADCR_VDD x M x 100 / VDD */
-	    adcr100m = (ADCR_VDD * M) / (VDD * 10);
+    uint32_t getADC(void)
+    {
+        uint32_t adcValue = 0;
+        // uint32_t vdd = 3306;          /*! VDD in mV */
+        /* Calibrate ADCR_TEMP25: ADCR_TEMP25 = ADCR_VDD x V_TEMP25 / VDD */
+        adcrTemp25 = ADCR_VDD * V_TEMP25 / VDD;
+        /* ADCR_100M = ADCR_VDD x M x 100 / VDD */
+        adcr100m = (ADCR_VDD * M) / (VDD * 10);
 
-	    /* measure mcu temperature. */
-		AnalogIn adc(A0);
-		adcValue = adc.read_temp();
-		adcValue = (uint32_t)(STANDARD_TEMP - ((int32_t)adcValue - (int32_t)adcrTemp25) * 100 / (int32_t)adcr100m);
-		printf("adcValue = %ld\n", adcValue);
-		return adcValue;
-	}
+        /* measure mcu temperature. */
+        AnalogIn adc(A0);
+        adcValue = adc.read_temp();
+        adcValue = (uint32_t)(STANDARD_TEMP - ((int32_t)adcValue - (int32_t)adcrTemp25) * 100 / (int32_t)adcr100m);
+        DEBUG("adcValue = %ld\n", adcValue);
+        return adcValue;
+    }
 
-	void updateTemperature(void *){
+    void updateTemperature(void *){
 
-		M2MObjectInstance* inst = tempObject->object_instance();
-		M2MResource* res = inst->resource("3206");
-		currentTemp = getADC();
-		printf("current temp is:%ld",currentTemp);
-		stringstream ss;
-		ss << currentTemp;
-		std::string stringField = ss.str();
-		// std::string stringField = "36";
-		res->set_value((uint8_t*)stringField.c_str(), stringField.length());
-	}
+        M2MObjectInstance* inst = tempObject->object_instance();
+        M2MResource* res = inst->resource("3206");
+        currentTemp = getADC();
+        DEBUG("current temp is:%ld",currentTemp);
+        stringstream ss;
+        ss << currentTemp;
+        std::string stringField = ss.str();
+        // std::string stringField = "36";
+        res->set_value((uint8_t*)stringField.c_str(), stringField.length());
+    }
 
-	~TempResource();
+    ~TempResource();
 private:
-	M2MObject* tempObject;
-	uint32_t currentTemp;
-	/* data */
+    M2MObject* tempObject;
+    uint32_t currentTemp;
+    /* data */
 };
+
+// sample the accelerometer every second
+void acceSample(void) {
+    double g_Ax = 0;
+    double g_Ay = 0;
+    double g_Az = 0;
+
+    int16_t g_Mx_Offset = 0;
+    int16_t g_My_Offset = 0;
+    int16_t g_Mz_Offset = 0;
+
+    double g_Mx = 0;
+    double g_My = 0;
+    double g_Mz = 0;
+
+    double g_Mx_LP = 0;
+    double g_My_LP = 0;
+    double g_Mz_LP = 0;
+
+    double g_Yaw = 0;
+    double g_Yaw_LP = 0;
+    double g_Pitch = 0;
+    double g_Roll = 0;
+
+    bool g_FirstRun = true;
+
+    double sinAngle = 0;
+    double cosAngle = 0;
+    double Bx = 0;
+    double By = 0;
+
+    g_Ax = acc_raw.x;
+    g_Ay = acc_raw.y;
+    g_Az = acc_raw.z;
+
+    g_Ax = 0;
+    g_Ay = 0;
+    g_Az = 0;
+
+    g_Mx = 0;
+    g_My = 0;
+    g_Mz = 0;
+
+    /* Read sensor data */
+    accel.getAxis(acc_raw);
+    mag.getAxis(acc_data);
+
+    g_Ax = acc_raw.x;
+    g_Ay = acc_raw.y;
+    g_Az = acc_raw.z;
+    /* Average accel value */
+    for (uint8_t i = 1; i < MAX_ACCEL_AVG_COUNT; i++)
+    {
+        g_Ax_buff[i] = g_Ax_buff[i - 1];
+        g_Ay_buff[i] = g_Ay_buff[i - 1];
+        g_Az_buff[i] = g_Az_buff[i - 1];
+    }
+
+    g_Ax_buff[0] = acc_raw.x;
+    g_Ay_buff[0] = acc_raw.y;
+    g_Az_buff[0] = acc_raw.z;
+
+    for (uint8_t i = 0; i < MAX_ACCEL_AVG_COUNT; i++)
+    {
+        g_Ax += (double)g_Ax_buff[i];
+        g_Ay += (double)g_Ay_buff[i];
+        g_Az += (double)g_Az_buff[i];
+    }
+
+    g_Ax /= MAX_ACCEL_AVG_COUNT;
+    g_Ay /= MAX_ACCEL_AVG_COUNT;
+    g_Az /= MAX_ACCEL_AVG_COUNT;
+
+    if(g_FirstRun)
+    {
+        g_Mx_LP = acc_data.x;
+        g_My_LP = acc_data.y;
+        g_Mz_LP = acc_data.z;
+    }
+
+    g_Mx_LP += ((double)acc_data.x - g_Mx_LP) * 0.01;
+    g_My_LP += ((double)acc_data.y - g_My_LP) * 0.01;
+    g_Mz_LP += ((double)acc_data.z - g_Mz_LP) * 0.01;
+
+    /* Calculate magnetometer values */
+    g_Mx = g_Mx_LP - g_Mx_Offset;
+    g_My = g_My_LP - g_My_Offset;
+    g_Mz = g_Mz_LP - g_Mz_Offset;
+
+    /* Calculate roll angle g_Roll (-180deg, 180deg) and sin, cos */
+    g_Roll = atan2(g_Ay, g_Az) * RadToDeg;
+    sinAngle = sin(g_Roll * DegToRad);
+    cosAngle = cos(g_Roll * DegToRad);
+
+    /* De-rotate by roll angle g_Roll */
+    By = g_My * cosAngle - g_Mz * sinAngle;
+    g_Mz = g_Mz * cosAngle + g_My * sinAngle;
+    g_Az = g_Ay * sinAngle + g_Az * cosAngle;
+
+    /* Calculate pitch angle g_Pitch (-90deg, 90deg) and sin, cos*/
+    g_Pitch = atan2(-g_Ax , g_Az) * RadToDeg;
+    sinAngle = sin(g_Pitch * DegToRad);
+    cosAngle = cos(g_Pitch * DegToRad);
+
+    /* De-rotate by pitch angle g_Pitch */
+    Bx = g_Mx * cosAngle + g_Mz * sinAngle;
+
+    /* Calculate yaw = ecompass angle psi (-180deg, 180deg) */
+    g_Yaw = atan2(-By, Bx) * RadToDeg;
+    if(g_FirstRun)
+    {
+        g_Yaw_LP = g_Yaw;
+        g_FirstRun = false;
+    }
+
+    g_Yaw_LP += (g_Yaw - g_Yaw_LP) * 0.01;
+    acceAngle = g_Yaw_LP ;
+    DEBUG("float = %3.1f\n", g_Yaw_LP);
+    DEBUG("int = %ld\n", acceAngle);
+
+}
+
 
 void app_start(int, char**)
 {
 
-    bleUart.printf("uart3 printf\n");
+    bleUart.DEBUG("uart3 DEBUG\n");
 	output.baud(115200);
-	printf("App init success!\r\n");
+	DEBUG("App init success!\r\n");
 
 	eth.init();
 	if(eth.connect() != 0)
 	{
-		printf("fail to init EthernetInterface connect\n");		
+		DEBUG("fail to init EthernetInterface connect\n");		
 	}
 	if(lwipv4_socket_init() != 0)
 	{
-		printf("fail to init lwipv4 socket\n");
+		DEBUG("fail to init lwipv4 socket\n");
 	}
-	output.printf("IPv4 address is:%s\r\n", eth.getIPAddress());
-	output.printf("endpoint device name is:%s\r\n", MBED_ENDPOINT_NAME);
+	output.DEBUG("IPv4 address is:%s\r\n", eth.getIPAddress());
+	output.DEBUG("endpoint device name is:%s\r\n", MBED_ENDPOINT_NAME);
 
     auto tempRes = new TempResource();
     // we create our button and LED resources
     auto button_resource = new ButtonResource();
     auto led_resource = new LedResource();
+    auto ble_resource = new BleResource();
+    auto angle_resource = new AngleResource();
 
     // Unregister button (SW3) press will unregister endpoint from connector.mbed.com
     unreg_button.fall(&mbed_client, &MbedClient::test_unregister);
 
     // Observation Button (SW2) press will send update of endpoint resource values to connector
     obs_button.fall(button_resource, &ButtonResource::handle_button_click);
+
+    accel.enable();
+    mag.enable();
 
     mbed_client.create_interface();
 
@@ -421,9 +586,11 @@ void app_start(int, char**)
 
 	M2MObjectList objectList;
 	objectList.push_back(deviceObject);
-    objectList.push_back(button_resource->get_object());
-    objectList.push_back(led_resource->get_object());
+    objectList.push_back(button_resource->getObject());
+    objectList.push_back(led_resource->getObject());
 	objectList.push_back(tempRes->getObject());
+    objectList.push_back(ble_resource->getObject());
+    objectList.push_back(angle_resource->getObject());
 
 	mbed_client.set_register_object(registerObject);
 
@@ -431,5 +598,5 @@ void app_start(int, char**)
 
 	minar::Scheduler::postCallback(fp.bind(registerObject,objectList));
 	minar::Scheduler::postCallback(&mbed_client,&MbedClient::test_update_register).period(minar::milliseconds(25000));
-    // minar::Scheduler::postCallback(acceSample).period(minar::milliseconds(500));
+    minar::Scheduler::postCallback(acceSample).period(minar::milliseconds(1000));
 }

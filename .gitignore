@@ -2,6 +2,7 @@
 *.sw*
 *.asm
 .vim.custom
+.tags
 gdb.script
 upload.tar.gz
 
